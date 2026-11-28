@@ -2,37 +2,36 @@ import io
 import streamlit as st
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
-import seaborn as sns
-from sklearn.model_selection import train_test_split
-from sklearn.linear_model import LinearRegression
 from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
-from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+from sklearn.linear_model import LinearRegression
+from sklearn.metrics import mean_absolute_error, r2_score
+from sklearn.model_selection import train_test_split
 
 # ==============================================================================
-# CONFIGURACIÓN DE LA PÁGINA Y REFERENTE FINANCIERO
+# CONFIGURACIÓN DE LA PÁGINA Y META FINANCIERA MENSUAL
 # ==============================================================================
 st.set_page_config(
-    page_title="Gerencia Financiera - Hospital de Yotoco",
+    page_title="Meta de Facturación - Hospital de Yotoco",
     page_icon="🏥",
     layout="wide"
 )
 
-GASTO_REFERENCIA = 581_014_027  # Promedio de gastos (nómina, insumos, operación)
+META_GASTO_MENSUAL = 582_000_000  # Promedio / meta mensual de gastos (COP)
 
-plt.style.use("default")
-sns.set_theme(style="whitegrid")
-
-# Estilo visual corporativo limpio
 st.markdown("""
     <style>
         .main { background-color: #f8f9fa; }
-        .stMetric { background-color: #ffffff; padding: 15px; border-radius: 10px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
+        .stMetric {
+            background-color: #ffffff;
+            padding: 15px;
+            border-radius: 10px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+        }
     </style>
 """, unsafe_allow_html=True)
 
 # ==============================================================================
-# CABECERA INSTITUCIONAL CON LOS DOS LOGOS DEL HOSPITAL
+# CABECERA INSTITUCIONAL
 # ==============================================================================
 col_logo1, col_titulo, col_logo2 = st.columns([1, 4, 1])
 
@@ -43,8 +42,11 @@ with col_logo1:
         st.write("📌 [Logo 1]")
 
 with col_titulo:
-    st.title("🏥 Inteligencia Financiera y Costos Hospitalarios")
-    st.markdown("**E.S.E. Hospital Local de Yotoco** | *Autora:* Laura Juliana Loaiza Saavedra (ID: 428429) - **UNIMINUTO**")
+    st.title("🏥 Proyección de Meta de Facturación Hospitalaria")
+    st.markdown(
+        "**E.S.E. Hospital Local de Yotoco** | *Autora:* Laura Juliana Loaiza Saavedra "
+        "(ID: 428429) - **UNIMINUTO**"
+    )
 
 with col_logo2:
     try:
@@ -55,139 +57,144 @@ with col_logo2:
 st.markdown("---")
 
 
-def leer_excel_xenco(fuente):
-    """Lee un archivo Excel priorizando 'Plantilla De Informe' cuando está disponible."""
+def cargar_consolidado(fuente):
+    """Carga un archivo Excel priorizando 'Plantilla De Informe' si existe."""
     try:
         xl = pd.ExcelFile(fuente)
-        if "Plantilla De Informe" in xl.sheet_names:
-            return pd.read_excel(xl, sheet_name="Plantilla De Informe")
-        return pd.read_excel(xl, sheet_name=0)
+        hoja = "Plantilla De Informe" if "Plantilla De Informe" in xl.sheet_names else xl.sheet_names[0]
+        return pd.read_excel(xl, sheet_name=hoja)
     except Exception:
         return pd.read_excel(fuente)
 
 
-def convertir_a_excel(df_exportar, nombre_hoja_excel):
-    output = io.BytesIO()
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        df_exportar.to_excel(writer, index=False, sheet_name=nombre_hoja_excel)
-    return output.getvalue()
+def buscar_col(data, candidatos, fallback=None):
+    for c in candidatos:
+        if c in data.columns:
+            return c
+    if fallback is not None and fallback < len(data.columns):
+        return data.columns[fallback]
+    return None
 
 
-def generar_excel_informe_predictivo(
-    df_comparativa,
-    df_predicciones,
-    df_unidades_err,
-    resumen_texto,
-    mes_str,
-    anio_int,
-    unidad_str
+def calcular_meta_categoria(df_base, col_cat, col_val, meta_total, col_pred=None):
+    """
+    Calcula cuánto debería facturar cada categoría para llegar a `meta_total`.
+    Usa la participación ponderada entre facturación real y predicción del modelo
+    (si está disponible) para distribuir la meta de 582.000.000 pesos.
+    """
+    if not col_cat or col_cat not in df_base.columns:
+        return pd.DataFrame()
+
+    tmp = df_base.copy()
+    tmp[col_cat] = tmp[col_cat].fillna("SIN ESPECIFICAR").astype(str).str.strip()
+
+    if col_pred and col_pred in tmp.columns:
+        agrup = tmp.groupby(col_cat).agg(
+            Facturacion_Mes_Anterior=(col_val, "sum"),
+            Prediccion_Modelo_Base=(col_pred, "sum"),
+            Registros=(col_val, "count")
+        ).reset_index()
+        # Peso combinado: 50% facturación real mes anterior + 50% predicción del modelo
+        base_peso = 0.5 * agrup["Facturacion_Mes_Anterior"].clip(lower=0) + 0.5 * agrup["Prediccion_Modelo_Base"].clip(lower=0)
+    else:
+        agrup = tmp.groupby(col_cat).agg(
+            Facturacion_Mes_Anterior=(col_val, "sum"),
+            Registros=(col_val, "count")
+        ).reset_index()
+        base_peso = agrup["Facturacion_Mes_Anterior"].clip(lower=0)
+
+    suma_pesos = base_peso.sum()
+    if suma_pesos > 0:
+        agrup["Participacion_%"] = (base_peso / suma_pesos) * 100.0
+        agrup["Meta_Facturacion_Mes_Sgtes ($)"] = (base_peso / suma_pesos) * meta_total
+    else:
+        n_cats = max(len(agrup), 1)
+        agrup["Participacion_%"] = 100.0 / n_cats
+        agrup["Meta_Facturacion_Mes_Sgtes ($)"] = meta_total / n_cats
+
+    agrup["Incremento_Requerido ($)"] = agrup["Meta_Facturacion_Mes_Sgtes ($)"] - agrup["Facturacion_Mes_Anterior"]
+    agrup = agrup.sort_values(by="Meta_Facturacion_Mes_Sgtes ($)", ascending=False).reset_index(drop=True)
+    return agrup
+
+
+def generar_excel_meta(
+    resumen_df,
+    df_servicios,
+    df_medicos,
+    df_entidades,
+    df_unidades,
+    df_modelos,
+    resumen_txt
 ):
-    """Genera un archivo Excel multipestaña con el informe predictivo y su conclusión."""
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        df_comparativa.to_excel(writer, index=False, sheet_name="Comparativa_Modelos")
-        if df_unidades_err is not None and not df_unidades_err.empty:
-            df_unidades_err.to_excel(writer, index=False, sheet_name="Error_Unidades")
-        df_predicciones.head(1000).to_excel(writer, index=False, sheet_name="Predicciones_Muestra")
-        df_resumen = pd.DataFrame({
-            "Periodo": [f"{mes_str} {anio_int}"],
-            "Unidad_Funcional": [unidad_str],
-            "Gasto_Referencia_COP": [GASTO_REFERENCIA],
-            "Resumen_Ejecutivo": [resumen_texto]
-        })
-        df_resumen.to_excel(writer, index=False, sheet_name="Resumen_Ejecutivo")
+        resumen_df.to_excel(writer, index=False, sheet_name="Resumen_Meta_582M")
+        if not df_servicios.empty:
+            df_servicios.to_excel(writer, index=False, sheet_name="Meta_Por_Servicios")
+        if not df_medicos.empty:
+            df_medicos.to_excel(writer, index=False, sheet_name="Meta_Por_Medicos")
+        if not df_entidades.empty:
+            df_entidades.to_excel(writer, index=False, sheet_name="Meta_Por_Entidades")
+        if not df_unidades.empty:
+            df_unidades.to_excel(writer, index=False, sheet_name="Meta_Por_Unidades")
+        if not df_modelos.empty:
+            df_modelos.to_excel(writer, index=False, sheet_name="Comparativa_Modelos")
+        pd.DataFrame({"Informe_Ejecutivo": [resumen_txt]}).to_excel(
+            writer, index=False, sheet_name="Texto_Informe"
+        )
     return output.getvalue()
 
 
 # ==============================================================================
-# PANEL LATERAL: CARGA DE ARCHIVO Y SELECCIÓN DE PERIODO (XENCO)
+# PANEL LATERAL: SUBIDA DEL CONSOLIDADO Y CONFIGURACIÓN DEL MES SIGUIENTE
 # ==============================================================================
-st.sidebar.header("📁 Carga de Datos y Periodo")
-st.sidebar.markdown("Suba el archivo de Xenco y especifique el periodo:")
-
-mes_seleccionado = st.sidebar.selectbox(
-    "Mes de Facturación",
-    ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"]
+st.sidebar.header("📁 1. Subir Consolidado")
+archivo_subido = st.sidebar.file_uploader(
+    "Suba el archivo Consolidado (.xlsx)",
+    type=["xlsx"]
 )
-anio_seleccionado = st.sidebar.selectbox("Año", [2026, 2025, 2024, 2023])
 
-archivo_subido = st.sidebar.file_uploader("Cargar Facturación Xenco (.xlsx)", type=["xlsx"])
+meta_gasto = st.sidebar.number_input(
+    "Promedio / Meta de Gastos Mensual (COP)",
+    min_value=1_000_000,
+    value=META_GASTO_MENSUAL,
+    step=1_000_000,
+    format="%d"
+)
 
+meses = [
+    "Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio",
+    "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"
+]
+mes_siguiente = st.sidebar.selectbox("Mes Siguiente a Proyectar", meses, index=10)
+anio_proyeccion = st.sidebar.selectbox("Año de Proyección", [2026, 2025, 2027], index=0)
 
-@st.cache_data
-def cargar_datos_por_defecto():
-    try:
-        return leer_excel_xenco("CONSOLIDADO.xlsx")
-    except Exception:
-        return None
-
+df_raw = None
+origen_datos = None
 
 if archivo_subido is not None:
     try:
-        df = leer_excel_xenco(archivo_subido)
-        st.sidebar.success(f"✅ Archivo Xenco cargado para **{mes_seleccionado} {anio_seleccionado}**")
-        datos_cargados = True
+        df_raw = cargar_consolidado(archivo_subido)
+        origen_datos = f"Archivo subido: {archivo_subido.name}"
     except Exception as e:
-        st.sidebar.error(f"⚠️ Error al leer el archivo: {e}")
-        datos_cargados = False
+        st.sidebar.error(f"Error al leer el archivo subido: {e}")
 else:
-    df = cargar_datos_por_defecto()
-    if df is not None:
-        datos_cargados = True
-        st.sidebar.info(f"📌 Usando archivo predeterminado (**Periodo: {mes_seleccionado} {anio_seleccionado}**).")
-    else:
-        datos_cargados = False
-        st.warning("📌 Por favor, suba el archivo Excel de Xenco en el panel lateral.")
+    try:
+        df_raw = cargar_consolidado("CONSOLIDADO.xlsx")
+        origen_datos = "Archivo local predeterminado: CONSOLIDADO.xlsx"
+    except Exception:
+        df_raw = None
 
-if datos_cargados:
-    # Mapeo seguro de columnas de Xenco
-    col_unidad = "UNIDAD FUNCIONAL" if "UNIDAD FUNCIONAL" in df.columns else df.columns[0]
-    col_detalle = "C. COSTOS DETALLE" if "C. COSTOS DETALLE" in df.columns else (df.columns[1] if len(df.columns) > 1 else col_unidad)
-    col_articulo = "NOMBRE ARTICULO" if "NOMBRE ARTICULO" in df.columns else (df.columns[2] if len(df.columns) > 2 else col_unidad)
-    col_factura = "VALOR FACTURADO" if "VALOR FACTURADO" in df.columns else "VALOR FACTURADO"
-    col_costo = "VALOR COSTO" if "VALOR COSTO" in df.columns else "VALOR COSTO"
-    col_profesional = "NOMBRE PROFESIONAL" if "NOMBRE PROFESIONAL" in df.columns else "NOMBRE PROFESIONAL"
-    col_entidad = "NOMBRE ENTIDAD" if "NOMBRE ENTIDAD" in df.columns else "NOMBRE ENTIDAD"
-    col_servicio = "TIPO SERVICIO" if "TIPO SERVICIO" in df.columns else None
-    col_cantidad = "CANTIDAD" if "CANTIDAD" in df.columns else None
+if df_raw is None or df_raw.empty:
+    st.warning("Sube el archivo Excel del **Consolidado** en el panel lateral para analizar y calcular la meta de facturación.")
+    st.stop()
 
-    if col_factura in df.columns:
-        df[col_factura] = pd.to_numeric(df[col_factura], errors="coerce").fillna(0)
-    if col_costo in df.columns:
-        df[col_costo] = pd.to_numeric(df[col_costo], errors="coerce").fillna(0)
-    if col_cantidad and col_cantidad in df.columns:
-        df[col_cantidad] = pd.to_numeric(df[col_cantidad], errors="coerce").fillna(1)
+st.sidebar.success(f"Datos cargados: {origen_datos} ({len(df_raw):,} registros)")
 
-    # ==============================================================================
-    # FILTROS GERENCIALES
-    # ==============================================================================
-    st.sidebar.markdown("---")
-    st.sidebar.header("🎛️ Filtros Gerenciales")
-
-    unidades_disponibles = list(df[col_unidad].dropna().unique()) if col_unidad in df.columns else []
-    unidad_seleccionada = st.sidebar.selectbox("Filtrar por Unidad Funcional", ["Todas"] + [str(u) for u in unidades_disponibles])
-
-    if unidad_seleccionada != "Todas" and col_unidad in df.columns:
-        df_filtrado = df[df[col_unidad].astype(str) == unidad_seleccionada].copy()
-    else:
-        df_filtrado = df.copy()
-
-    # ==============================================================================
-    # CABECERA DEL PERIODO
-    # ==============================================================================
-    st.subheader(f"📅 Reporte Financiero Xenco - **{mes_seleccionado} de {anio_seleccionado}**")
-    st.markdown(f"**Unidad Funcional Filtrada:** `{unidad_seleccionada}`")
-    st.markdown("---")
-
-    # ==============================================================================
-    # MÉTRICAS EJECUTIVAS GLOBALES + INDICADORES NUEVOS
-    # ==============================================================================
-    st.header("📈 Indicadores Financieros Globales")
-
-    total_facturado = df_filtrado[col_factura].sum() if col_factura in df_filtrado.columns else 0
-    total_costo = df_filtrado[col_costo].sum() if col_costo in df_filtrado.columns else 0
-    utilidad_operativa = total_facturado - total_costo
-    margen_utilidad = (utilidad_operativa / total_facturado * 100) if total_facturado > 0 else 0
-    total_atenciones = len(df_filtrado)
-
-    col1, col2, col3, col4 = st.columns(4)
+# ==============================================================================
+# DETECCIÓN DE COLUMNAS Y FILTRO DEL MES ANTERIOR
+# ==============================================================================
+col_factura = buscar_col(df_raw, ["VALOR FACTURADO", "VALOR_FACTURADO", "FACTURACION"])
+if not col_factura:
+    st.error("No se encontró la columna 'VALOR FACTURADO' en el consolidado.")
+    st.stop()
