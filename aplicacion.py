@@ -147,4 +147,68 @@ def generar_excel_meta(
         if not df_entidades.empty:
             df_entidades.to_excel(writer, index=False, sheet_name="Meta_Por_Entidades")
         if not df_unidades.empty:
-            df_unidades.to_excel(writer, index=False, sheet_name="Meta
+            df_unidades.to_excel(writer, index=False, sheet_name="Meta_Por_Unidades")
+        if not df_modelos.empty:
+            df_modelos.to_excel(writer, index=False, sheet_name="Comparativa_Modelos")
+        pd.DataFrame({"Informe_Ejecutivo": [resumen_txt]}).to_excel(
+            writer, index=False, sheet_name="Texto_Informe"
+        )
+    return output.getvalue()
+
+
+# ==============================================================================
+# PANEL LATERAL: SUBIDA DEL CONSOLIDADO Y CONFIGURACIÓN DEL MES SIGUIENTE
+# ==============================================================================
+st.sidebar.header("📁 1. Subir Consolidado")
+archivo_subido = st.sidebar.file_uploader(
+    "Suba el archivo Consolidado (.xlsx)",
+    type=["xlsx"]
+)
+
+meta_gasto = st.sidebar.number_input(
+    "Promedio / Meta de Gastos Mensual (COP)",
+    min_value=1_000_000,
+    value=META_GASTO_MENSUAL,
+    step=1_000_000,
+    format="%d"
+)
+
+meses = [
+    "Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio",
+    "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"
+]
+mes_siguiente = st.sidebar.selectbox("Mes Siguiente a Proyectar", meses, index=11)
+anio_proyeccion = st.sidebar.selectbox("Año de Proyección", [2026, 2025, 2027], index=0)
+
+df_raw = None
+origen_datos = None
+
+if archivo_subido is not None:
+    try:
+        df_raw = cargar_consolidado(archivo_subido)
+        origen_datos = f"Archivo subido: {archivo_subido.name}"
+    except Exception as e:
+        st.sidebar.error(f"Error al leer el archivo subido: {e}")
+else:
+    try:
+        df_raw = cargar_consolidado("CONSOLIDADO.xlsx")
+        origen_datos = "Archivo local predeterminado: CONSOLIDADO.xlsx"
+    except Exception:
+        df_raw = None
+
+if df_raw is None or df_raw.empty:
+    st.warning("Sube el archivo Excel del **Consolidado** en el panel lateral para analizar y calcular la meta de facturación.")
+    st.stop()
+
+st.sidebar.success(f"Datos cargados: {origen_datos} ({len(df_raw):,} registros)")
+
+# ==============================================================================
+# DETECCIÓN DE COLUMNAS, CÁLCULO DE META Y DESGLOSE POR RUBROS
+# ==============================================================================
+try:
+    col_factura = buscar_col(df_raw, ["VALOR FACTURADO", "VALOR_FACTURADO", "FACTURADO", "FACTURACION"])
+    if not col_factura:
+        st.error(f"No se encontró la columna 'VALOR FACTURADO'. Columnas disponibles: {list(df_raw.columns)}")
+        st.stop()
+
+    col_fecha = buscar_
