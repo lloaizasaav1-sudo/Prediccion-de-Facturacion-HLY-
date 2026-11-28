@@ -57,20 +57,31 @@ with col_logo2:
 st.markdown("---")
 
 
+def normalizar_columnas(df_in):
+    df_out = df_in.copy()
+    df_out.columns = [str(c).strip() for c in df_out.columns]
+    return df_out
+
+
 def cargar_consolidado(fuente):
     """Carga un archivo Excel priorizando 'Plantilla De Informe' si existe."""
     try:
         xl = pd.ExcelFile(fuente)
         hoja = "Plantilla De Informe" if "Plantilla De Informe" in xl.sheet_names else xl.sheet_names[0]
-        return pd.read_excel(xl, sheet_name=hoja)
+        return normalizar_columnas(pd.read_excel(xl, sheet_name=hoja))
     except Exception:
-        return pd.read_excel(fuente)
+        return normalizar_columnas(pd.read_excel(fuente))
 
 
 def buscar_col(data, candidatos, fallback=None):
     for c in candidatos:
         if c in data.columns:
             return c
+    for col in data.columns:
+        col_up = col.upper()
+        for cand in candidatos:
+            if cand.upper() in col_up:
+                return col
     if fallback is not None and fallback < len(data.columns):
         return data.columns[fallback]
     return None
@@ -79,8 +90,7 @@ def buscar_col(data, candidatos, fallback=None):
 def calcular_meta_categoria(df_base, col_cat, col_val, meta_total, col_pred=None):
     """
     Calcula cuánto debería facturar cada categoría para llegar a `meta_total`.
-    Usa la participación ponderada entre facturación real y predicción del modelo
-    (si está disponible) para distribuir la meta de 582.000.000 pesos.
+    Combina facturación del mes anterior y predicción del modelo base.
     """
     if not col_cat or col_cat not in df_base.columns:
         return pd.DataFrame()
@@ -89,21 +99,23 @@ def calcular_meta_categoria(df_base, col_cat, col_val, meta_total, col_pred=None
     tmp[col_cat] = tmp[col_cat].fillna("SIN ESPECIFICAR").astype(str).str.strip()
 
     if col_pred and col_pred in tmp.columns:
-        agrup = tmp.groupby(col_cat).agg(
+        agrup = tmp.groupby(col_cat, dropna=False).agg(
             Facturacion_Mes_Anterior=(col_val, "sum"),
             Prediccion_Modelo_Base=(col_pred, "sum"),
             Registros=(col_val, "count")
         ).reset_index()
-        # Peso combinado: 50% facturación real mes anterior + 50% predicción del modelo
-        base_peso = 0.5 * agrup["Facturacion_Mes_Anterior"].clip(lower=0) + 0.5 * agrup["Prediccion_Modelo_Base"].clip(lower=0)
+        base_peso = (
+            0.5 * agrup["Facturacion_Mes_Anterior"].clip(lower=0)
+            + 0.5 * agrup["Prediccion_Modelo_Base"].clip(lower=0)
+        )
     else:
-        agrup = tmp.groupby(col_cat).agg(
+        agrup = tmp.groupby(col_cat, dropna=False).agg(
             Facturacion_Mes_Anterior=(col_val, "sum"),
             Registros=(col_val, "count")
         ).reset_index()
         base_peso = agrup["Facturacion_Mes_Anterior"].clip(lower=0)
 
-    suma_pesos = base_peso.sum()
+    suma_pesos = float(base_peso.sum())
     if suma_pesos > 0:
         agrup["Participacion_%"] = (base_peso / suma_pesos) * 100.0
         agrup["Meta_Facturacion_Mes_Sgtes ($)"] = (base_peso / suma_pesos) * meta_total
@@ -113,8 +125,7 @@ def calcular_meta_categoria(df_base, col_cat, col_val, meta_total, col_pred=None
         agrup["Meta_Facturacion_Mes_Sgtes ($)"] = meta_total / n_cats
 
     agrup["Incremento_Requerido ($)"] = agrup["Meta_Facturacion_Mes_Sgtes ($)"] - agrup["Facturacion_Mes_Anterior"]
-    agrup = agrup.sort_values(by="Meta_Facturacion_Mes_Sgtes ($)", ascending=False).reset_index(drop=True)
-    return agrup
+    return agrup.sort_values(by="Meta_Facturacion_Mes_Sgtes ($)", ascending=False).reset_index(drop=True)
 
 
 def generar_excel_meta(
@@ -166,7 +177,7 @@ meses = [
     "Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio",
     "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"
 ]
-mes_siguiente = st.sidebar.selectbox("Mes Siguiente a Proyectar", meses, index=10)
+mes_siguiente = st.sidebar.selectbox("Mes Siguiente a Proyectar", meses, index=11)
 anio_proyeccion = st.sidebar.selectbox("Año de Proyección", [2026, 2025, 2027], index=0)
 
 df_raw = None
@@ -192,9 +203,193 @@ if df_raw is None or df_raw.empty:
 st.sidebar.success(f"Datos cargados: {origen_datos} ({len(df_raw):,} registros)")
 
 # ==============================================================================
-# DETECCIÓN DE COLUMNAS Y FILTRO DEL MES ANTERIOR
+# DETECCIÓN DE COLUMNAS, CÁLCULO DE META Y DESGLOSE POR RUBROS
 # ==============================================================================
-col_factura = buscar_col(df_raw, ["VALOR FACTURADO", "VALOR_FACTURADO", "FACTURACION"])
-if not col_factura:
-    st.error("No se encontró la columna 'VALOR FACTURADO' en el consolidado.")
-    st.stop()
+try:
+    col_factura = buscar_col(df_raw, ["VALOR FACTURADO", "VALOR_FACTURADO", "FACTURADO", "FACTURACION"])
+    if not col_factura:
+        st.error(f"No se encontró la columna 'VALOR FACTURADO'. Columnas disponibles: {list(df_raw.columns)}")
+        st.stop()
+
+    col_fecha = buscar_col(df_raw, ["FECHA", "FECHA FACTURA", "FECHA_FACTURA", "FECHA ATENCION"])
+    col_articulo = buscar_col(df_raw, ["NOMBRE ARTICULO", "NOMBRE_ARTICULO", "SERVICIO", "TIPO SERVICIO"])
+    col_profesional = buscar_col(df_raw, ["NOMBRE PROFESIONAL", "NOMBRE_PROFESIONAL", "PROFESIONAL", "MEDICO"])
+    col_entidad = buscar_col(df_raw, ["NOMBRE ENTIDAD", "NOMBRE_ENTIDAD", "ENTIDAD", "EPS"])
+    col_unidad = buscar_col(df_raw, ["UNIDAD FUNCIONAL", "UNIDAD_FUNCIONAL", "UNIDAD"])
+    col_cantidad = buscar_col(df_raw, ["CANTIDAD", "CANT"])
+
+    df_clean = df_raw.copy()
+    if df_clean[col_factura].dtype == object:
+        df_clean[col_factura] = (
+            df_clean[col_factura].astype(str)
+            .str.replace("$", "", regex=False)
+            .str.replace(".", "", regex=False)
+            .str.replace(",", ".", regex=False)
+        )
+    df_clean[col_factura] = pd.to_numeric(df_clean[col_factura], errors="coerce").fillna(0)
+
+    df_mes_anterior = df_clean.copy()
+    etiqueta_mes_anterior = "Consolidado base (mes anterior)"
+
+    if col_fecha:
+        fechas_dt = pd.to_datetime(df_clean[col_fecha], errors="coerce")
+        if fechas_dt.notna().any():
+            df_clean["_PERIODO_YM"] = fechas_dt.dt.to_period("M")
+            periodos_validos = sorted(df_clean["_PERIODO_YM"].dropna().unique())
+            if len(periodos_validos) > 0:
+                periodo_sel = st.sidebar.selectbox(
+                    "Periodo base (Mes Anterior)",
+                    options=[str(p) for p in periodos_validos],
+                    index=len(periodos_validos) - 1
+                )
+                df_mes_anterior = df_clean[df_clean["_PERIODO_YM"].astype(str) == periodo_sel].copy()
+                etiqueta_mes_anterior = f"Mes anterior ({periodo_sel})"
+
+    facturado_mes_anterior = float(df_mes_anterior[col_factura].sum())
+    meta_facturar_mes_sgte = float(meta_gasto)
+    brecha_vs_mes_anterior = meta_facturar_mes_sgte - facturado_mes_anterior
+    variacion_pct = (
+        ((meta_facturar_mes_sgte - facturado_mes_anterior) / facturado_mes_anterior) * 100.0
+        if facturado_mes_anterior > 0 else 0.0
+    )
+
+    # Entrenamiento comparativo para estimar la participación predictiva
+    df_modelos = pd.DataFrame()
+    mejor_modelo_nombre = "Escalamiento Proporcional"
+    df_mes_anterior["PRED_BASE"] = df_mes_anterior[col_factura].clip(lower=0)
+
+    feat_cols = []
+    df_ml = df_mes_anterior.copy()
+    if col_cantidad:
+        df_ml["_CANT"] = pd.to_numeric(df_ml[col_cantidad], errors="coerce").fillna(1)
+        feat_cols.append("_CANT")
+
+    for idx_c, c_orig in enumerate([col_articulo, col_profesional, col_entidad, col_unidad]):
+        if c_orig and c_orig in df_ml.columns:
+            cod_name = f"_COD_{idx_c}"
+            df_ml[cod_name] = pd.factorize(df_ml[c_orig].fillna("SIN ESPECIFICAR").astype(str).str.strip())[0]
+            feat_cols.append(cod_name)
+
+    if len(df_ml) >= 20 and len(feat_cols) >= 1:
+        X_m = df_ml[feat_cols]
+        y_m = df_ml[col_factura]
+        X_tr, X_te, y_tr, y_te = train_test_split(X_m, y_m, test_size=0.2, random_state=42)
+
+        candidatos_mod = {
+            "Regresión Lineal": LinearRegression(),
+            "Random Forest Regressor": RandomForestRegressor(n_estimators=100, min_samples_split=5, random_state=42),
+            "Gradient Boosting Regressor": GradientBoostingRegressor(n_estimators=120, learning_rate=0.1, max_depth=4, random_state=42)
+        }
+        filas_m = []
+        mejor_rmse_val = float("inf")
+        mejor_obj = None
+
+        for nom_m, obj_m in candidatos_mod.items():
+            obj_m.fit(X_tr, y_tr)
+            p_te = obj_m.predict(X_te)
+            rmse_m = float(np.sqrt(np.mean((y_te - p_te) ** 2)))
+            filas_m.append({
+                "Modelo": nom_m,
+                "R²": round(float(r2_score(y_te, p_te)), 4),
+                "MAE ($)": round(float(mean_absolute_error(y_te, p_te)), 2),
+                "RMSE ($)": round(rmse_m, 2)
+            })
+            if rmse_m < mejor_rmse_val:
+                mejor_rmse_val = rmse_m
+                mejor_modelo_nombre = nom_m
+                mejor_obj = obj_m
+
+        df_modelos = pd.DataFrame(filas_m).sort_values(by="RMSE ($)", ascending=True).reset_index(drop=True)
+        if mejor_obj is not None:
+            df_mes_anterior["PRED_BASE"] = np.clip(mejor_obj.predict(X_m), 0, None)
+
+    st.subheader(f"🎯 Meta de Facturación para {mes_siguiente} {anio_proyeccion}")
+    st.caption(f"Base: {etiqueta_mes_anterior} | Columna facturación: {col_factura}")
+
+    k1, k2, k3, k4 = st.columns(4)
+    with k1:
+        st.metric("Facturado Mes Anterior (COP)", f"{facturado_mes_anterior:,.0f}")
+    with k2:
+        st.metric("Promedio / Meta de Gastos (COP)", f"{meta_gasto:,.0f}")
+    with k3:
+        st.metric(
+            "Debe Facturar Mes Siguiente (COP)",
+            f"{meta_facturar_mes_sgte:,.0f}",
+            delta=f"{brecha_vs_mes_anterior:+,.0f}"
+        )
+    with k4:
+        st.metric("Variación Requerida (%)", f"{variacion_pct:+.1f}%", delta=mejor_modelo_nombre)
+
+    st.info(
+        f"Para llegar al promedio de gastos mensual de {meta_gasto:,.0f} pesos en {mes_siguiente} {anio_proyeccion}, "
+        f"partiendo de {facturado_mes_anterior:,.0f} pesos del mes anterior, se debe facturar "
+        f"{meta_facturar_mes_sgte:,.0f} pesos ({brecha_vs_mes_anterior:+,.0f} pesos | {variacion_pct:+.1f}%)."
+    )
+
+    st.markdown("---")
+    st.header("📊 ¿Cuánto debe facturar cada rubro para llegar a la meta?")
+
+    df_servicios = calcular_meta_categoria(df_mes_anterior, col_articulo, col_factura, meta_facturar_mes_sgte, "PRED_BASE")
+    df_medicos = calcular_meta_categoria(df_mes_anterior, col_profesional, col_factura, meta_facturar_mes_sgte, "PRED_BASE")
+    df_entidades = calcular_meta_categoria(df_mes_anterior, col_entidad, col_factura, meta_facturar_mes_sgte, "PRED_BASE")
+    df_unidades = calcular_meta_categoria(df_mes_anterior, col_unidad, col_factura, meta_facturar_mes_sgte, "PRED_BASE")
+
+    tab_serv, tab_med, tab_eps, tab_uf = st.tabs([
+        "Por Servicios",
+        "Por Médicos",
+        "Por Entidad / EPS",
+        "Por Unidad Funcional"
+    ])
+
+    with tab_serv:
+        if not df_servicios.empty:
+            st.bar_chart(df_servicios.head(15).set_index(col_articulo)["Meta_Facturacion_Mes_Sgtes ($)"])
+            st.dataframe(df_servicios)
+        else:
+            st.info("No se detectó columna de servicios.")
+
+    with tab_med:
+        if not df_medicos.empty:
+            st.bar_chart(df_medicos.head(15).set_index(col_profesional)["Meta_Facturacion_Mes_Sgtes ($)"])
+            st.dataframe(df_medicos)
+        else:
+            st.info("No se detectó columna de médicos.")
+
+    with tab_eps:
+        if not df_entidades.empty:
+            st.bar_chart(df_entidades.head(15).set_index(col_entidad)["Meta_Facturacion_Mes_Sgtes ($)"])
+            st.dataframe(df_entidades)
+        else:
+            st.info("No se detectó columna de entidades.")
+
+    with tab_uf:
+        if not df_unidades.empty:
+            st.bar_chart(df_unidades.set_index(col_unidad)["Meta_Facturacion_Mes_Sgtes ($)"])
+            st.dataframe(df_unidades)
+        else:
+            st.info("No se detectó columna de unidad funcional.")
+
+    if not df_modelos.empty:
+        with st.expander("Comparativa de modelos predictivos"):
+            st.dataframe(df_modelos)
+
+    st.markdown("---")
+    st.header("📥 Descargar Informe de Proyección y Metas")
+
+    resumen_df_export = pd.DataFrame([{
+        "Mes_Siguiente": f"{mes_siguiente} {anio_proyeccion}",
+        "Base_Mes_Anterior": etiqueta_mes_anterior,
+        "Facturado_Mes_Anterior_COP": round(facturado_mes_anterior, 0),
+        "Promedio_Gastos_Mensual_COP": round(meta_gasto, 0),
+        "Debe_Facturar_Mes_Siguiente_COP": round(meta_facturar_mes_sgte, 0),
+        "Diferencia_Vs_Mes_Anterior_COP": round(brecha_vs_mes_anterior, 0),
+        "Variacion_Requerida_%": round(variacion_pct, 2),
+        "Modelo_Base": mejor_modelo_nombre
+    }])
+
+    resumen_informe_txt = (
+        f"INFORME DE META DE FACTURACIÓN - E.S.E. HOSPITAL LOCAL DE YOTOCO\n"
+        f"Autora: Laura Juliana Loaiza Saavedra (ID: 428429) - UNIMINUTO\n"
+        f"Mes proyectado: {mes_siguiente} {anio_proyeccion} | Base: {etiqueta_mes_anterior}\n"
+        f"Facturado mes anterior: {facturado_mes_anterior:,.0f} pesos\n"
+        f"Promedio de gastos mensual: {meta_gasto:,.0f} pesos\n"
