@@ -27,12 +27,7 @@ sns.set_theme(style="whitegrid")
 st.markdown("""
     <style>
         .main { background-color: #f8f9fa; }
-        .stMetric {
-            background-color: #ffffff;
-            padding: 15px;
-            border-radius: 10px;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.05);
-        }
+        .stMetric { background-color: #ffffff; padding: 15px; border-radius: 10px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
     </style>
 """, unsafe_allow_html=True)
 
@@ -48,11 +43,8 @@ with col_logo1:
         st.write("📌 [Logo 1]")
 
 with col_titulo:
-    st.title("🏥 Inteligencia Financiera, Costos y Analítica Predictiva")
-    st.markdown(
-        "**E.S.E. Hospital Local de Yotoco** | *Autora:* Laura Juliana Loaiza Saavedra "
-        "(ID: 428429) - **UNIMINUTO**"
-    )
+    st.title("🏥 Inteligencia Financiera y Costos Hospitalarios")
+    st.markdown("**E.S.E. Hospital Local de Yotoco** | *Autora:* Laura Juliana Loaiza Saavedra (ID: 428429) - **UNIMINUTO**")
 
 with col_logo2:
     try:
@@ -64,7 +56,7 @@ st.markdown("---")
 
 
 def leer_excel_xenco(fuente):
-    """Lee un archivo Excel (.xlsx) priorizando 'Plantilla De Informe' si existe."""
+    """Lee un archivo Excel priorizando 'Plantilla De Informe' cuando está disponible."""
     try:
         xl = pd.ExcelFile(fuente)
         if "Plantilla De Informe" in xl.sheet_names:
@@ -90,7 +82,7 @@ def generar_excel_informe_predictivo(
     anio_int,
     unidad_str
 ):
-    """Genera un libro Excel multipestaña con el informe predictivo completo."""
+    """Genera un archivo Excel multipestaña con el informe predictivo y su conclusión."""
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         df_comparativa.to_excel(writer, index=False, sheet_name="Comparativa_Modelos")
@@ -115,10 +107,7 @@ st.sidebar.markdown("Suba el archivo de Xenco y especifique el periodo:")
 
 mes_seleccionado = st.sidebar.selectbox(
     "Mes de Facturación",
-    [
-        "Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio",
-        "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"
-    ]
+    ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"]
 )
 anio_seleccionado = st.sidebar.selectbox("Año", [2026, 2025, 2024, 2023])
 
@@ -148,8 +137,57 @@ else:
         st.sidebar.info(f"📌 Usando archivo predeterminado (**Periodo: {mes_seleccionado} {anio_seleccionado}**).")
     else:
         datos_cargados = False
-        st.warning("📌 Por favor, suba el archivo Excel de Xenco (.xlsx) en el panel lateral.")
+        st.warning("📌 Por favor, suba el archivo Excel de Xenco en el panel lateral.")
 
 if datos_cargados:
     # Mapeo seguro de columnas de Xenco
     col_unidad = "UNIDAD FUNCIONAL" if "UNIDAD FUNCIONAL" in df.columns else df.columns[0]
+    col_detalle = "C. COSTOS DETALLE" if "C. COSTOS DETALLE" in df.columns else (df.columns[1] if len(df.columns) > 1 else col_unidad)
+    col_articulo = "NOMBRE ARTICULO" if "NOMBRE ARTICULO" in df.columns else (df.columns[2] if len(df.columns) > 2 else col_unidad)
+    col_factura = "VALOR FACTURADO" if "VALOR FACTURADO" in df.columns else "VALOR FACTURADO"
+    col_costo = "VALOR COSTO" if "VALOR COSTO" in df.columns else "VALOR COSTO"
+    col_profesional = "NOMBRE PROFESIONAL" if "NOMBRE PROFESIONAL" in df.columns else "NOMBRE PROFESIONAL"
+    col_entidad = "NOMBRE ENTIDAD" if "NOMBRE ENTIDAD" in df.columns else "NOMBRE ENTIDAD"
+    col_servicio = "TIPO SERVICIO" if "TIPO SERVICIO" in df.columns else None
+    col_cantidad = "CANTIDAD" if "CANTIDAD" in df.columns else None
+
+    if col_factura in df.columns:
+        df[col_factura] = pd.to_numeric(df[col_factura], errors="coerce").fillna(0)
+    if col_costo in df.columns:
+        df[col_costo] = pd.to_numeric(df[col_costo], errors="coerce").fillna(0)
+    if col_cantidad and col_cantidad in df.columns:
+        df[col_cantidad] = pd.to_numeric(df[col_cantidad], errors="coerce").fillna(1)
+
+    # ==============================================================================
+    # FILTROS GERENCIALES
+    # ==============================================================================
+    st.sidebar.markdown("---")
+    st.sidebar.header("🎛️ Filtros Gerenciales")
+
+    unidades_disponibles = list(df[col_unidad].dropna().unique()) if col_unidad in df.columns else []
+    unidad_seleccionada = st.sidebar.selectbox("Filtrar por Unidad Funcional", ["Todas"] + [str(u) for u in unidades_disponibles])
+
+    if unidad_seleccionada != "Todas" and col_unidad in df.columns:
+        df_filtrado = df[df[col_unidad].astype(str) == unidad_seleccionada].copy()
+    else:
+        df_filtrado = df.copy()
+
+    # ==============================================================================
+    # CABECERA DEL PERIODO
+    # ==============================================================================
+    st.subheader(f"📅 Reporte Financiero Xenco - **{mes_seleccionado} de {anio_seleccionado}**")
+    st.markdown(f"**Unidad Funcional Filtrada:** `{unidad_seleccionada}`")
+    st.markdown("---")
+
+    # ==============================================================================
+    # MÉTRICAS EJECUTIVAS GLOBALES + INDICADORES NUEVOS
+    # ==============================================================================
+    st.header("📈 Indicadores Financieros Globales")
+
+    total_facturado = df_filtrado[col_factura].sum() if col_factura in df_filtrado.columns else 0
+    total_costo = df_filtrado[col_costo].sum() if col_costo in df_filtrado.columns else 0
+    utilidad_operativa = total_facturado - total_costo
+    margen_utilidad = (utilidad_operativa / total_facturado * 100) if total_facturado > 0 else 0
+    total_atenciones = len(df_filtrado)
+
+    col1, col2, col3, col4 = st.columns(4)
